@@ -325,7 +325,7 @@ class Custom_RLOOTrainer(Trainer):
                         output_ids = unwrapped_evaluator.generate(
                             **eval_inputs,
                             max_new_tokens=args.response_length,
-                            temperature=args.temperature,
+                            temperature=0.1,
                         )
                         eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
 
@@ -548,7 +548,7 @@ class Custom_RLOOTrainer(Trainer):
                         output_ids = unwrapped_evaluator.generate(
                             **eval_inputs,
                             max_new_tokens=args.response_length,
-                            temperature=args.temperature,
+                            temperature=0.1,
                         )
                         eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
 
