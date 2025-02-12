@@ -320,14 +320,14 @@ class Custom_RLOOTrainer(Trainer):
 
                     # Run batched evaluation using the evaluator model.
                     with unwrap_model_for_generation(self.ref_policy, self.accelerator, gather_deepspeed3_params=args.ds3_gather_for_generation) as unwrapped_evaluator:
-                        eval_inputs = self.evaluator_tokenizer(eval_prompts, return_tensors="pt", padding=True)
+                        eval_inputs = self.processing_class(eval_prompts, return_tensors="pt", padding=True)
                         eval_inputs = {k: v.to(device) for k, v in eval_inputs.items()}
                         output_ids = unwrapped_evaluator.generate(
                             **eval_inputs,
                             max_new_tokens=args.response_length,
                             temperature=args.temperature,
                         )
-                        eval_texts = self.evaluator_tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+                        eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
 
                     # Parse outputs to obtain binary rewards.
                     batch_rewards = []
@@ -543,14 +543,14 @@ class Custom_RLOOTrainer(Trainer):
 
                     # Run batched evaluation using the evaluator model.
                     with unwrap_model_for_generation(self.ref_policy, self.accelerator, gather_deepspeed3_params=args.ds3_gather_for_generation) as unwrapped_evaluator:
-                        eval_inputs = self.evaluator_tokenizer(eval_prompts, return_tensors="pt", padding=True)
+                        eval_inputs = self.processing_class(eval_prompts, return_tensors="pt", padding=True)
                         eval_inputs = {k: v.to(device) for k, v in eval_inputs.items()}
                         output_ids = unwrapped_evaluator.generate(
                             **eval_inputs,
                             max_new_tokens=args.response_length,
                             temperature=args.temperature,
                         )
-                        eval_texts = self.evaluator_tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+                        eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
 
                     # Parse outputs to obtain binary rewards.
                     batch_rewards = []

@@ -23,6 +23,7 @@ python examples/scripts/test_rloo_trl.py \
     --total_episodes 10000 \
     --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
     --missing_eos_penalty 1.0 \
+    --response_length 256
 
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml \
     examples/scripts/test_rloo_trl.py \
@@ -39,10 +40,8 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
     --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
     --local_rollout_forward_batch_size 1 \
     --missing_eos_penalty 1.0 \
-    --response_length 1024
-    
+    --response_length 256
 """
-
 
 
 def craft_prompt(example):
