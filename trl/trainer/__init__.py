@@ -67,6 +67,7 @@ _import_structure = {
     "reward_trainer": ["RewardTrainer"],
     "rloo_config": ["RLOOConfig"],
     "rloo_trainer": ["RLOOTrainer"],
+    "custom_rloo_trainer": ["Custom_RLOOTrainer"],
     "sft_config": ["SFTConfig"],
     "sft_trainer": ["SFTTrainer"],
     "utils": [
@@ -140,6 +141,7 @@ if TYPE_CHECKING:
     from .reward_trainer import RewardTrainer
     from .rloo_config import RLOOConfig
     from .rloo_trainer import RLOOTrainer
+    from .custom_rloo_trainer import Custom_RLOOTrainer
     from .sft_config import SFTConfig
     from .sft_trainer import SFTTrainer
     from .utils import (

@@ -95,6 +95,7 @@ _import_structure = {
         "RewardTrainer",
         "RLOOConfig",
         "RLOOTrainer",
+        "Custom_RLOOTrainer",
         "SFTConfig",
         "SFTTrainer",
         "WinRateCallback",

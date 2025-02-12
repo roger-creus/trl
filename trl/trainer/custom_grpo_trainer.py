@@ -394,12 +394,16 @@ class Custom_GRPOTrainer(Trainer):
         # Build evaluation prompts.
         eval_prompts = []
         for prompt, completion in zip(prompts, completions):
+            
+            print(f"Prompt: {prompt}")
+            print(f"Completion: {completion}")
+            
             eval_prompt = (
                 "You are an evaluator that checks if the provided reasoning and response for a multiple-choice question is correct. "
-                "Given the question and the reasoning with the answer, your final output needs to be only a 1 if you believe the reasoning is correct and the answer is right; output 0 otherwise. "
-                "Importantly, your last line should only be 'Answer: <integer_idx>' with no additional contents.\n"
+                "Given the question and the reasoning response, your final output needs to be only a 1 if you believe the reasoning is correct and the answer is right; output 0 otherwise. "
+                "Importantly, your last line should only be 'Evaluation: <integer_evaluation>' with no additional contents.\n"
                 f"Question: {prompt}\n\n"
-                f"Response: {completion}\n\n"
+                f"Response to evaluate: {completion}\n\n"
             )
             eval_input = [{"role": "user", "content": eval_prompt}]
             formatted_eval_prompt = self.evaluator_tokenizer.apply_chat_template(
@@ -428,18 +432,25 @@ class Custom_GRPOTrainer(Trainer):
         eval_responses = [DummyResponse(text) for text in eval_texts]
         evaluator_rewards = []
         for response in eval_responses:
+            
             raw_eval = response.outputs[0].text.strip() if response.outputs and response.outputs[0].text else ""
+            raw_eval = raw_eval.split("<｜Assistant｜>")[1].strip()
             try:
-                raw_eval = raw_eval.split("<｜Assistant｜>")[1].strip()
                 raw_eval = raw_eval.split("</think>")[1].strip()
-                raw_eval = raw_eval.split("Answer:")[1].strip()
+            except:
+                pass
+            
+            try:
+                raw_eval = raw_eval.split("Evaluation:")[1].strip()
                 binary_signal = int(raw_eval)
                 if binary_signal not in [0, 1]:
                     binary_signal = 0
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error: {e} with raw_eval: {raw_eval}")
                 binary_signal = 0
             evaluator_rewards.append(binary_signal)
+            print(f"Raw eval: {raw_eval}, Binary signal: {binary_signal}")
+            print("--------------------")
         
         print(evaluator_rewards)
 
