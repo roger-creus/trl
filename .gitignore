@@ -1,3 +1,6 @@
+rloo_results/*
+results_rloo/*
+
 *.bak
 .gitattributes
 .last_checked

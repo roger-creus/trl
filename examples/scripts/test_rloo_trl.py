@@ -20,13 +20,14 @@ python examples/scripts/test_rloo_trl.py \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --output_dir results_rloo \
-    --per_device_train_batch_size 2 \
-    --gradient_accumulation_steps 1 \
+    --rloo_k 2 \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 4 \
     --total_episodes 10000 \
-    --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --model_name_or_path EleutherAI/pythia-1b-deduped \
     --temperature 0.6 \
-    --response_length 512 \
     --missing_eos_penalty 1.0 \
+    --response_length 1024 \
     --stop_token eos
 
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml \

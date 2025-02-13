@@ -727,13 +727,7 @@ class Custom_RLOOTrainer(Trainer):
                     
                     # Parse outputs to obtain binary rewards.
                     batch_rewards = []
-                    eval_generations = []
                     for txt in eval_texts:
-                        try:
-                            eval_generations.append(txt.split("### Your turn ###")[1].strip())
-                        except:
-                            eval_generations.append(txt)
-                            
                         try:
                             evaluation_txt = txt.strip().split("\n")
                             evaluation_txt = next((line for line in evaluation_txt if "EVALUATION:" in line), None)
@@ -747,10 +741,16 @@ class Custom_RLOOTrainer(Trainer):
                         batch_rewards.append(reward_value)
 
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
+
+                    if args.missing_eos_penalty is not None:
+                        contain_eos_token = torch.any(postprocessed_response == processing_class.eos_token_id, dim=-1)
+                        score[~contain_eos_token] -= args.missing_eos_penalty
+                    
                     table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
-                    table["evaluator response"].extend(gather_object(eval_generations))
+                    table["evaluator response"].extend(gather_object(eval_texts))
                 if sampling:
                     break
+        
         import pandas as pd
         df = pd.DataFrame(table)
         if self.accelerator.is_main_process:
@@ -758,7 +758,7 @@ class Custom_RLOOTrainer(Trainer):
             if "wandb" in args.report_to:
                 import wandb
                 if wandb.run is not None:
-                    wandb.log({"completions": wandb.Table(dataframe=df)})
+                    wandb.log({"completions": wandb.Table(dataframe=df)}, step=self.state.global_step)
             if "comet_ml" in args.report_to:
                 log_table_to_comet_experiment(name="completions.csv", table=df)
                 
