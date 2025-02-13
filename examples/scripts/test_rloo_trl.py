@@ -55,6 +55,7 @@ def craft_prompt(example):
         "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
         "5. Output ONLY this format on the last line:\n"
         "   FINAL_ANSWER: <choice_idx>\n"
+        "6. You cannot add any additional text after the FINAL_ANSWER line.\n"
     )
 
     # Optional few-shot example (can be removed if unnecessary)

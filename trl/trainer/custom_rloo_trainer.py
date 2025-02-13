@@ -233,10 +233,6 @@ class Custom_RLOOTrainer(Trainer):
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
-            # TODO: should we set these to None? originally these are not passed
-            pad_token_id=processing_class.pad_token_id,
-            bos_token_id=processing_class.bos_token_id,
-            eos_token_id=processing_class.eos_token_id,
         )
 
         accelerator.print("=== Training policy ===")
@@ -327,6 +323,7 @@ class Custom_RLOOTrainer(Trainer):
                             "5. Output only this format on the last line:\n"
                             "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
                             "   - Ensure no additional text appears after this line.\n\n"
+                            "6. You cannot add any additional text after the FINAL_EVALUATION line.\n\n"
                             "### Query ###\n"
                             f"{q}\n\n"
                             "### Completion ###\n"
@@ -516,10 +513,6 @@ class Custom_RLOOTrainer(Trainer):
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
-            # TODO: should we set these to None? originally these are not passed
-            pad_token_id=processing_class.pad_token_id,
-            bos_token_id=processing_class.bos_token_id,
-            eos_token_id=processing_class.eos_token_id,
         )
         table = defaultdict(list)
         
@@ -565,6 +558,7 @@ class Custom_RLOOTrainer(Trainer):
                             "5. Output only this format on the last line:\n"
                             "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
                             "   - Ensure no additional text appears after this line.\n\n"
+                            "6. You cannot add any additional text after the FINAL_EVALUATION line.\n\n"
                             "### Query ###\n"
                             f"{q}\n\n"
                             "### Completion ###\n"
@@ -601,7 +595,7 @@ class Custom_RLOOTrainer(Trainer):
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
                     print(f"Score: {score}")
                     table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
-                    table["evaluator_response"].extend(gather_object(eval_texts))
+                    table["evaluator response"].extend(gather_object(processing_class.batch_decode(output_ids, skip_special_tokens=True)))
                 if sampling:
                     break
         import pandas as pd
