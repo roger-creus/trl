@@ -10,6 +10,8 @@ from trl import ModelConfig, RLOOConfig, RLOOTrainer, ScriptArguments
 from trl.trainer.utils import SIMPLE_CHAT_TEMPLATE
 from trl import Custom_RLOOTrainer as RLOOTrainer
 
+from IPython import embed
+
 """
 python examples/scripts/test_rloo_trl.py \
     --dataset_name cais/mmlu \
@@ -18,75 +20,85 @@ python examples/scripts/test_rloo_trl.py \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --output_dir results_rloo \
-    --per_device_train_batch_size 4 \
+    --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
     --total_episodes 10000 \
     --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --missing_eos_penalty 1.0 \
-    --response_length 256
+    --temperature 0.6 \
+    --stop_token eos
 
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml \
     examples/scripts/test_rloo_trl.py \
     --dataset_name cais/mmlu \
     --dataset_train_split test \
     --output_dir rloo_results \
-    --rloo_k 2 \
+    --rloo_k 4 \
+    --local_rollout_forward_batch_size 4 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 1 \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --learning_rate 3e-6 \
-    --per_device_train_batch_size 1 \
-    --gradient_accumulation_steps 16 \
     --total_episodes 10000 \
-    --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
-    --local_rollout_forward_batch_size 1 \
-    --missing_eos_penalty 1.0 \
-    --response_length 256
+    --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --temperature 0.6 \
+    --response_length 512 \
+    --stop_token eos
 """
 
 
 def craft_prompt(example):
-    # Step-by-step instructions enforcing structured output and word limit
-    instructions = (
-        "You will answer a multiple-choice question. Follow these steps strictly:\n"
-        "1. Analyze the question and all answer choices carefully.\n"
-        "2. Think step-by-step and reason through the possible answers.\n"
-        "   - Clearly explain your thought process inside <think> and </think> tags.\n"
-        "3. Conclude your reasoning and select the most correct answer.\n"
-        "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
-        "5. Output ONLY this format on the last line:\n"
-        "   FINAL_ANSWER: <choice_idx>\n"
-        "6. You cannot add any additional text after the FINAL_ANSWER line.\n"
-    )
-
-    # Optional few-shot example (can be removed if unnecessary)
-    few_shot = (
-        "### Example ###\n"
-        "Question: What is 5 + 7?\n"
-        "Choices:\n"
-        "0: 10\n"
-        "1: 12\n"
-        "2: 15\n"
-        "3: 17\n\n"
-        "<think> 5 plus 7 equals 12, which matches choice 1. </think>\n"
-        "FINAL_ANSWER: 1\n\n"
-        "################\n\n"
-    )
-
-    # Extract the question and choices
+    # Extract question and choices from the example.
     question = example["question"]
     choices = example["choices"]
+
+    # Create a string with numbered choices.
     choices_str = "\n".join([f"{i}: {choice}" for i, choice in enumerate(choices)])
 
-    # Construct the full prompt
-    prompt = (
-        instructions + "\n" +
-        few_shot +  # Remove this line if few-shot is not needed
-        "### Your Turn ###\n"
+    # Few-shot examples to guide the model.
+    few_shot_examples = (
+        "Example 1:\n"
+        "Question: What is 3 * 3?\n"
+        "Choices:\n"
+        "0: 6\n"
+        "1: 9\n"
+        "2: 12\n"
+        "3: 15\n"
+        "ANSWER: 1\n\n"
+        "Example 2:\n"
+        "Question: What is 7 + 5?\n"
+        "Choices:\n"
+        "0: 10\n"
+        "1: 13\n"
+        "2: 12\n"
+        "3: 14\n"
+        "ANSWER: 2\n\n"
+        "Example 3:\n"
+        "Question: What is 10 - 5?\n"
+        "Choices:\n"
+        "0: 4\n"
+        "1: 6\n"
+        "2: 7\n"
+        "3: 5\n"
+        "ANSWER: 3\n\n"
+    )
+    
+    # System prompt instructs the model about the expected answer format.
+    system_prompt = (
+        "Answer the following multiple-choice question by providing 'ANSWER: <integer_index_of_the_correct_choice>' "
+        "Always conclude your response with 'ANSWER: <integer_idx>' with no additional contents. "
+        f"You have a budget of {training_args.response_length // 2} words to generate the answer.\n\n" 
+        + few_shot_examples
+    )
+
+    # User prompt provides the actual question and its choices.
+    user_prompt = (
         f"Question: {question}\n\n"
         f"Choices:\n{choices_str}\n\n"
     )
 
-    return {"prompt": prompt}
+    # Return the conversation in a list of messages.
+    return {"prompt": system_prompt + "### Your turn ###\n" + user_prompt}
 
 
 if __name__ == "__main__":

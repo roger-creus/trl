@@ -142,6 +142,7 @@ class Custom_RLOOTrainer(Trainer):
         for module in [policy, ref_policy]:
             if isinstance(module, nn.Module):
                 disable_dropout_in_model(module)
+        
         if args.stop_token and args.stop_token == "eos":
             args.stop_token_id = self.processing_class.eos_token_id
 
@@ -203,7 +204,7 @@ class Custom_RLOOTrainer(Trainer):
             self.deepspeed = self.model
         else:
             self.ref_policy = self.ref_policy.to(self.accelerator.device)
-
+            
     def get_train_dataloader(self):
         return self.dataloader
 
@@ -265,8 +266,17 @@ class Custom_RLOOTrainer(Trainer):
                 queries = data["input_ids"].to(device)
                 queries = queries.repeat(args.rloo_k, 1)
                 context_length = queries.shape[1]
-                # Generate responses for each query.
-                with unwrap_model_for_generation(self.model, accelerator, gather_deepspeed3_params=args.ds3_gather_for_generation) as unwrapped_model:
+                responses = []
+                postprocessed_responses = []
+                logprobs = []
+                ref_logprobs = []
+                scores = []
+                sequence_lengths = []
+                
+                # Generate responses and compute logprobs
+                with unwrap_model_for_generation(
+                    self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
+                ) as unwrapped_model:
                     query_responses, logitss = batch_generation(
                         unwrapped_model,
                         queries,
@@ -274,13 +284,6 @@ class Custom_RLOOTrainer(Trainer):
                         processing_class.pad_token_id,
                         generation_config,
                     )
-                # Process responses in batches.
-                responses = []
-                postprocessed_responses = []
-                logprobs = []
-                ref_logprobs = []
-                sequence_lengths = []
-                scores = []  # here we will compute binary rewards using the evaluator
 
                 for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
                     query = queries[i : i + args.local_rollout_forward_batch_size]
@@ -298,9 +301,9 @@ class Custom_RLOOTrainer(Trainer):
                     del ref_output, ref_logits
                     torch.cuda.empty_cache()
 
-                    # Truncate responses after the first occurrence of the stop token.
+                    # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
                     postprocessed_response = response
-                    if args.stop_token_id is not None:
+                    if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
                             args.stop_token_id, processing_class.pad_token_id, response
                         )
@@ -312,54 +315,96 @@ class Custom_RLOOTrainer(Trainer):
                     decoded_completions = processing_class.batch_decode(postprocessed_response, skip_special_tokens=True)
                     eval_prompts = []
                     for q, c in zip(decoded_queries, decoded_completions):
+                        actual_q = q.split("### Your turn ###")[1].strip()
+                        try:
+                            reasoning_chain = c.split("</think>")[0].strip()
+                            final_part = c.split("</think>")[1]
+                            additional_reasoning = final_part.split("ANSWER:")[0].strip()
+                            reasoning_chain += f"\n\n{additional_reasoning}"
+                            predicted_answer = final_part.split("ANSWER:")[1].strip()
+                        except:
+                            reasoning_chain = c
+                            predicted_answer = "-1"
+                        
                         prompt_text = (
-                            "You are an evaluator tasked with determining the correctness of a generated response.\n"
-                            "Follow these steps strictly:\n"
-                            "1. Carefully read the given query and the corresponding generated completion.\n"
-                            "2. Think step-by-step and analyze whether the completion correctly answers the query.\n"
-                            "   - Clearly explain your reasoning inside <think> and </think> tokens.\n"
-                            "3. Conclude your evaluation.\n"
-                            "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
-                            "5. Output only this format on the last line:\n"
-                            "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
-                            "   - Ensure no additional text appears after this line.\n\n"
-                            "6. You cannot add any additional text after the FINAL_EVALUATION line.\n\n"
-                            "### Query ###\n"
-                            f"{q}\n\n"
-                            "### Completion ###\n"
-                            f"{c}\n\n"
+                            "You will verify whether a given guessed answer to a multiple-choice question is INCORRECT or CORRECT. "
+                            "You do not need to know the true answer; your task is solely to assess the provided REASONING and GUESS.\n\n"
+                            "You are given the following input:\n"
+                            "1. A QUESTION with multiple answer choices.\n"
+                            "2. The REASONING provided for a guessed answer.\n"
+                            "3. The GUESS answer in the form 'GUESS: <integer_idx>'.\n\n"
+                            "Important: If the guessed answer is '-1', it indicates an error in generating the guess and you must simply return INCORRECT without further analysis."
+                            "Always conclude your response exactly with one of the following on the final line with no additional text:\n"
+                            "EVALUATION: INCORRECT   OR   EVALUATION: CORRECT\n\n"
+                            "For providing your EVALUATION, only the final GUESS matters. However, please analyze the accompanying REASONING step-by-step to detect any logical flaws. "
+                            "Think very deeply."
+                            f"You have a budget of {args.response_length // 2} words to generate the answer.\n\n" 
+                            "### QUESTION ###\n"
+                            f"{actual_q}\n\n"
+                            "### REASONING ###\n"
+                            f"{reasoning_chain}\n\n"
+                            "### GUESS ###\n"
+                            f"{predicted_answer}\n\n"
+                            "### Your turn ###\n"
                         )
                         eval_prompts.append(prompt_text)
 
-                    # Run batched evaluation using the evaluator model.
-                    with unwrap_model_for_generation(self.ref_policy, self.accelerator, gather_deepspeed3_params=args.ds3_gather_for_generation) as unwrapped_evaluator:
+                    # Run batched evaluation using the evaluator model with response truncation.
+                    with unwrap_model_for_generation(
+                        self.ref_policy,
+                        self.accelerator,
+                        gather_deepspeed3_params=args.ds3_gather_for_generation
+                    ) as unwrapped_evaluator:
+                        
+                        # Prepare the inputs for the evaluator.
                         eval_inputs = self.processing_class(eval_prompts, return_tensors="pt", padding=True)
                         eval_inputs = {k: v.to(device) for k, v in eval_inputs.items()}
-                        output_ids = unwrapped_evaluator.generate(
-                            **eval_inputs,
-                            max_new_tokens=args.response_length,
-                            temperature=0.1,
-                        )
-                        eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
+                        
+                        with torch.no_grad():
+                            # Get the input_ids from the prepared prompt.
+                            eval_query = eval_inputs["input_ids"]
+                            eval_context_length = eval_query.shape[1]
+                            
+                            # Generate responses in batch using the batch_generation function.
+                            eval_responses, _ = batch_generation(
+                                unwrapped_evaluator,
+                                eval_query,
+                                eval_query.shape[0],
+                                self.processing_class.pad_token_id,
+                                generation_config,
+                            )
+                            
+                            # Extract tokens generated beyond the prompt.
+                            eval_responses = eval_responses[:, eval_context_length:]
+                            
+                            if args.stop_token_id is not None:
+                                postprocessed_eval_response = truncate_response(
+                                    args.stop_token_id,
+                                    self.processing_class.pad_token_id,
+                                    eval_responses
+                                )
+                            else:
+                                postprocessed_eval_response = eval_responses
+                        
+                        # Decode the postprocessed responses into text.
+                        eval_texts = self.processing_class.batch_decode(postprocessed_eval_response, skip_special_tokens=True)
 
                     # Parse outputs to obtain binary rewards.
                     batch_rewards = []
                     for txt in eval_texts:
                         try:
-                            # Extracting only the final evaluation line.
-                            evaluation_txt = txt.strip().split("\n")[-1].replace("FINAL_EVALUATION:", "").strip()
-                            reward_value = int(evaluation_txt)
+                            evaluation_txt = txt.strip().split("\n")
+                            evaluation_txt = next((line for line in evaluation_txt if "EVALUATION:" in line), None)
+                            reward_value = int(1 if evaluation_txt.replace("EVALUATION:", "").strip() == "CORRECT" else 0)
                             if reward_value not in [0, 1]:
                                 raise ValueError("Invalid evaluation score")
                         except Exception as e:
-                            reward_value = 0  # Default to incorrect if parsing fails
-                            print(f"Error parsing evaluator output: {e} on text: {txt}")
+                            reward_value = 0
+                            print(f"Error parsing evaluator output: {e}")
                         
                         batch_rewards.append(reward_value)
 
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
-                    print(f"Score: {score}")
-
                     responses.append(response)
                     postprocessed_responses.append(postprocessed_response)
                     logprobs.append(logprob)
@@ -373,7 +418,7 @@ class Custom_RLOOTrainer(Trainer):
                 ref_logprobs = torch.cat(ref_logprobs, 0)
                 sequence_lengths = torch.cat(sequence_lengths, 0)
                 scores = torch.cat(scores, 0)
-                del logprob, ref_logprob, eval_prompts, eval_inputs, output_ids, eval_texts
+                del logprob, score, ref_logprob, eval_prompts, eval_inputs, eval_responses, postprocessed_eval_response, eval_texts, eval_query
                 torch.cuda.empty_cache()
                 gc.collect()
 
@@ -382,10 +427,12 @@ class Custom_RLOOTrainer(Trainer):
                 if args.missing_eos_penalty is not None:
                     scores[~contain_eos_token] -= args.missing_eos_penalty
 
+                print(f"Scores: {scores}")
+
                 response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1)
                 padding_mask = response_idxs > sequence_lengths.unsqueeze(1)
-                logprobs = torch.masked_fill(logprobs, padding_mask, -1e10)
-                ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, -1e10)
+                logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
+                ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
 
                 kl = logprobs - ref_logprobs
 
@@ -417,7 +464,7 @@ class Custom_RLOOTrainer(Trainer):
 
                 torch.cuda.empty_cache()
 
-            # PPO Training Loop
+            # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
             for ppo_epoch_idx in range(args.num_ppo_epochs):
                 b_inds = np.random.permutation(args.local_batch_size)
                 minibatch_idx = 0
@@ -429,78 +476,116 @@ class Custom_RLOOTrainer(Trainer):
                         with accelerator.accumulate(model):
                             micro_batch_end = micro_batch_start + args.per_device_train_batch_size
                             micro_batch_inds = mini_batch_inds[micro_batch_start:micro_batch_end]
+
+                            # Get batch data
                             mb_advantage = advantages[micro_batch_inds]
                             mb_responses = responses[micro_batch_inds]
                             mb_query_responses = query_responses[micro_batch_inds]
                             mb_logprobs = logprobs[micro_batch_inds]
+
+                            # Forward pass
                             output = forward(model, mb_query_responses, processing_class.pad_token_id)
                             logits = output.logits[:, context_length - 1 : -1]
                             logits /= args.temperature + 1e-7
+
+                            # Compute new logprobs
                             new_logprobs = selective_log_softmax(logits, mb_responses)
-                            new_logprobs = torch.masked_fill(new_logprobs, padding_mask[micro_batch_inds], -1e10)
+                            new_logprobs = torch.masked_fill(
+                                new_logprobs, padding_mask[micro_batch_inds], INVALID_LOGPROB
+                            )
+
+                            # Compute probability ratios
+                            new_ratio = (new_logprobs - mb_logprobs).exp()
                             new_logprobs = new_logprobs.sum(1)
                             mb_logprobs = mb_logprobs.sum(1)
                             logprobs_diff = new_logprobs - mb_logprobs
                             ratio = torch.exp(logprobs_diff)
+
+                            # PPO clipped loss
                             pg_losses = -mb_advantage * ratio
                             pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
-                            pg_loss = torch.max(pg_losses, pg_losses2).mean()
-                            accelerator.backward(pg_loss)
+                            pg_loss_max = torch.max(pg_losses, pg_losses2)
+                            pg_loss = pg_loss_max.mean()
+
+                            # Final loss
+                            loss = pg_loss
+
+                            # Optimization step
+                            accelerator.backward(loss)
                             optimizer.step()
                             optimizer.zero_grad()
+
                             with torch.no_grad():
                                 pg_clipfrac = (pg_losses2 > pg_losses).float().mean()
                                 prob_dist = torch.nn.functional.softmax(logits, dim=-1)
                                 entropy = torch.logsumexp(logits, dim=-1) - torch.sum(prob_dist * logits, dim=-1)
                                 approxkl = 0.5 * (logprobs_diff**2).mean()
                                 approxkl_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = approxkl
-                                pg_clipfrac_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_clipfrac
+                                pg_clipfrac_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = (
+                                    pg_clipfrac
+                                )
                                 pg_loss_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_loss
                                 entropy_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = entropy.mean()
-                                ratio_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = ratio.mean()
+                                ratio_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = new_ratio.mean()
                         gradient_accumulation_idx += 1
                     minibatch_idx += 1
-                    del output, logits, new_logprobs, logprobs_diff, ratio, pg_losses, pg_losses2, pg_loss
+
+                    # del everything and empty cache
+                    # fmt: off
+                    del (
+                        output, logits, new_logprobs, logprobs_diff, ratio, pg_losses,
+                        pg_losses2, pg_loss, loss, pg_clipfrac, prob_dist, entropy, approxkl,
+                        mb_advantage, mb_responses, mb_query_responses, mb_logprobs,
+                    )
+                    # fmt: on
                     torch.cuda.empty_cache()
+
+            # Compute metrics
             with torch.no_grad():
                 mean_kl = kl.sum(1).mean()
                 mean_entropy = (-logprobs).sum(1).mean()
                 mean_non_score_reward = non_score_reward.mean()
                 eps = int(self.state.episode / (time.time() - start_time))
-                metrics = {
-                    "eps": eps,
-                    "objective/kl": self.accelerator.gather_for_metrics(mean_kl).mean().item(),
-                    "objective/entropy": self.accelerator.gather_for_metrics(mean_entropy).mean().item(),
-                    "objective/non_score_reward": self.accelerator.gather_for_metrics(mean_non_score_reward).mean().item(),
-                    "objective/rlhf_reward": self.accelerator.gather_for_metrics(rlhf_reward).mean().item(),
-                    "objective/scores": self.accelerator.gather_for_metrics(scores.mean()).mean().item(),
-                    "policy/approxkl_avg": self.accelerator.gather_for_metrics(approxkl_stats).mean().item(),
-                    "policy/clipfrac_avg": self.accelerator.gather_for_metrics(pg_clipfrac_stats).mean().item(),
-                    "loss/policy_avg": self.accelerator.gather_for_metrics(pg_loss_stats).mean().item(),
-                    "val/clipfrac_avg": self.accelerator.gather_for_metrics(vf_clipfrac_stats).mean().item(),
-                    "policy/entropy_avg": self.accelerator.gather_for_metrics(entropy_stats).mean().item(),
-                    "val/ratio": self.accelerator.gather_for_metrics(ratio_stats).mean().item(),
-                    "val/ratio_var": self.accelerator.gather_for_metrics(ratio_stats).var().item(),
-                    "val/num_eos_tokens": (responses == processing_class.eos_token_id).sum().item(),
-                    "lr": self.lr_scheduler.get_last_lr()[0],
-                    "episode": self.state.episode,
-                }
-                self.state.epoch = self.state.episode / (args.rloo_k * self.train_dataset_len)
+                metrics = {}
+                metrics["eps"] = eps
+                metrics["objective/kl"] = self.accelerator.gather_for_metrics(mean_kl).mean().item()
+                metrics["objective/entropy"] = self.accelerator.gather_for_metrics(mean_entropy).mean().item()
+                metrics["objective/non_score_reward"] = (
+                    self.accelerator.gather_for_metrics(mean_non_score_reward).mean().item()
+                )
+                metrics["objective/rlhf_reward"] = self.accelerator.gather_for_metrics(rlhf_reward).mean().item()
+                metrics["objective/scores"] = self.accelerator.gather_for_metrics(scores.mean()).mean().item()
+                metrics["policy/approxkl_avg"] = self.accelerator.gather_for_metrics(approxkl_stats).mean().item()
+                metrics["policy/clipfrac_avg"] = self.accelerator.gather_for_metrics(pg_clipfrac_stats).mean().item()
+                metrics["loss/policy_avg"] = self.accelerator.gather_for_metrics(pg_loss_stats).mean().item()
+                metrics["val/clipfrac_avg"] = self.accelerator.gather_for_metrics(vf_clipfrac_stats).mean().item()
+                metrics["policy/entropy_avg"] = self.accelerator.gather_for_metrics(entropy_stats).mean().item()
+                metrics["val/ratio"] = self.accelerator.gather_for_metrics(ratio_stats).mean().item()
+                metrics["val/ratio_var"] = self.accelerator.gather_for_metrics(ratio_stats).var().item()
+                metrics["val/num_eos_tokens"] = (responses == processing_class.eos_token_id).sum().item()
+                metrics["lr"] = self.lr_scheduler.get_last_lr()[0]
+                metrics["episode"] = self.state.episode
+                self.state.epoch = self.state.episode / (args.rloo_k * self.train_dataset_len)  # used by self.log
                 self.log(metrics)
+            del kl, mean_kl, mean_entropy, scores
+
             self.lr_scheduler.step()
             self.state.global_step += 1
             self.control = self.callback_handler.on_step_end(args, self.state, self.control)
             if self.control.should_save:
                 self._save_checkpoint(model, trial=None)
-                self.control = self.callback_handler.on_save(args, self.state, self.control)
+                self.control = self.callback_handler.on_save(self.args, self.state, self.control)
             torch.cuda.empty_cache()
             gc.collect()
+
             if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
                 self.generate_completions(sampling=True)
+
+        # HF trainer specifics
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
         if self.control.should_save:
             self._save_checkpoint(model, trial=None, metrics=None)
-            self.control = self.callback_handler.on_save(args, self.state, self.control)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     def generate_completions(self, sampling: bool = False):
         args = self.args
@@ -547,55 +632,103 @@ class Custom_RLOOTrainer(Trainer):
                     decoded_completions = processing_class.batch_decode(postprocessed_response, skip_special_tokens=True)
                     eval_prompts = []
                     for q, c in zip(decoded_queries, decoded_completions):
+                        actual_q = q.split("### Your turn ###")[1].strip()
+                        try:
+                            reasoning_chain = c.split("</think>")[0].strip()
+                            final_part = c.split("</think>")[1]
+                            additional_reasoning = final_part.split("ANSWER:")[0].strip()
+                            reasoning_chain += f"\n\n{additional_reasoning}"
+                            predicted_answer = final_part.split("ANSWER:")[1].strip()
+                        except:
+                            reasoning_chain = c
+                            predicted_answer = "-1"
+                        
                         prompt_text = (
-                            "You are an evaluator tasked with determining the correctness of a generated response.\n"
-                            "Follow these steps strictly:\n"
-                            "1. Carefully read the given query and the corresponding generated completion.\n"
-                            "2. Think step-by-step and analyze whether the completion correctly answers the query.\n"
-                            "   - Clearly explain your reasoning inside <think> and </think> tokens.\n"
-                            "3. Conclude your evaluation.\n"
-                            "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
-                            "5. Output only this format on the last line:\n"
-                            "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
-                            "   - Ensure no additional text appears after this line.\n\n"
-                            "6. You cannot add any additional text after the FINAL_EVALUATION line.\n\n"
-                            "### Query ###\n"
-                            f"{q}\n\n"
-                            "### Completion ###\n"
-                            f"{c}\n\n"
+                            "You will verify whether a given guessed answer to a multiple-choice question is INCORRECT or CORRECT. "
+                            "You do not need to know the true answer; your task is solely to assess the provided REASONING and GUESS.\n\n"
+                            "You are given the following input:\n"
+                            "1. A QUESTION with multiple answer choices.\n"
+                            "2. The REASONING provided for a guessed answer.\n"
+                            "3. The GUESS answer in the form 'GUESS: <integer_idx>'.\n\n"
+                            "Important: If the guessed answer is '-1', it indicates an error in generating the guess and you must simply return INCORRECT without further analysis."
+                            "Always conclude your response exactly with one of the following on the final line with no additional text:\n"
+                            "EVALUATION: INCORRECT   OR   EVALUATION: CORRECT\n\n"
+                            "For providing your EVALUATION, only the final GUESS matters. However, please analyze the accompanying REASONING step-by-step to detect any logical flaws. "
+                            "Think very deeply."
+                            f"You have a budget of {args.response_length // 2} words to generate the answer.\n\n" 
+                            "### QUESTION ###\n"
+                            f"{actual_q}\n\n"
+                            "### REASONING ###\n"
+                            f"{reasoning_chain}\n\n"
+                            "### GUESS ###\n"
+                            f"{predicted_answer}\n\n"
+                            "### Your turn ###\n"
                         )
                         eval_prompts.append(prompt_text)
 
-                    # Run batched evaluation using the evaluator model.
-                    with unwrap_model_for_generation(self.ref_policy, self.accelerator, gather_deepspeed3_params=args.ds3_gather_for_generation) as unwrapped_evaluator:
+                    # Run batched evaluation using the evaluator model with response truncation.
+                    with unwrap_model_for_generation(
+                        self.ref_policy,
+                        self.accelerator,
+                        gather_deepspeed3_params=args.ds3_gather_for_generation
+                    ) as unwrapped_evaluator:
+                        
+                        # Prepare the inputs for the evaluator.
                         eval_inputs = self.processing_class(eval_prompts, return_tensors="pt", padding=True)
                         eval_inputs = {k: v.to(device) for k, v in eval_inputs.items()}
-                        output_ids = unwrapped_evaluator.generate(
-                            **eval_inputs,
-                            max_new_tokens=args.response_length,
-                            temperature=0.1,
+                        
+                        # Get the input_ids from the prepared prompt.
+                        eval_query = eval_inputs["input_ids"]
+                        eval_context_length = eval_query.shape[1]
+                        
+                        # Generate responses in batch using the batch_generation function.
+                        eval_responses, _ = batch_generation(
+                            unwrapped_evaluator,
+                            eval_query,
+                            eval_query.shape[0],
+                            self.processing_class.pad_token_id,
+                            generation_config,
                         )
-                        eval_texts = self.processing_class.batch_decode(output_ids, skip_special_tokens=True)
-
+                        
+                        # Extract tokens generated beyond the prompt.
+                        eval_response = eval_responses[:, eval_context_length:]
+                        
+                        if args.stop_token_id is not None:
+                            eval_postprocessed_response = truncate_response(
+                                args.stop_token_id,
+                                self.processing_class.pad_token_id,
+                                eval_response
+                            )
+                        else:
+                            eval_postprocessed_response = eval_response
+                    
+                    # Decode the postprocessed responses into text.
+                    eval_texts = self.processing_class.batch_decode(eval_postprocessed_response, skip_special_tokens=True)
+                    
                     # Parse outputs to obtain binary rewards.
                     batch_rewards = []
+                    eval_generations = []
                     for txt in eval_texts:
                         try:
-                            # Extracting only the final evaluation line.
-                            evaluation_txt = txt.strip().split("\n")[-1].replace("FINAL_EVALUATION:", "").strip()
-                            reward_value = int(evaluation_txt)
+                            eval_generations.append(txt.split("### Your turn ###")[1].strip())
+                        except:
+                            eval_generations.append(txt)
+                            
+                        try:
+                            evaluation_txt = txt.strip().split("\n")
+                            evaluation_txt = next((line for line in evaluation_txt if "EVALUATION:" in line), None)
+                            reward_value = int(1 if evaluation_txt.replace("EVALUATION:", "").strip() == "CORRECT" else 0)
                             if reward_value not in [0, 1]:
                                 raise ValueError("Invalid evaluation score")
                         except Exception as e:
-                            reward_value = 0  # Default to incorrect if parsing fails
-                            print(f"Error parsing evaluator output: {e} on text: {txt}")
+                            reward_value = 0
+                            print(f"Error parsing evaluator output: {e}")
                         
                         batch_rewards.append(reward_value)
 
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
-                    print(f"Score: {score}")
                     table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
-                    table["evaluator response"].extend(gather_object(processing_class.batch_decode(output_ids, skip_special_tokens=True)))
+                    table["evaluator response"].extend(gather_object(eval_generations))
                 if sampling:
                     break
         import pandas as pd
@@ -609,7 +742,7 @@ class Custom_RLOOTrainer(Trainer):
             if "comet_ml" in args.report_to:
                 log_table_to_comet_experiment(name="completions.csv", table=df)
                 
-        del query, query_responses, response, postprocessed_response, decoded_queries, decoded_completions, eval_prompts, eval_inputs, output_ids, eval_texts, batch_rewards, score, table, df
+        del query, query_responses, response, postprocessed_response, decoded_queries, decoded_completions, eval_prompts, eval_inputs, eval_responses, eval_response, eval_postprocessed_response, eval_texts, batch_rewards, score, table, df
         torch.cuda.empty_cache()
         gc.collect()
 
