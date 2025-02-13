@@ -45,36 +45,48 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
 
 
 def craft_prompt(example):
-    # Clear instructions for the LLM.
+    # Step-by-step instructions enforcing structured output and word limit
     instructions = (
-        "Answer the following multiple-choice question. First, provide a concise chain-of-thought enclosed in "
-        "<think> and </think>. Then, on the final line, output only: Answer: <integer> "
-        "(the index of the correct choice) with no additional text."
+        "You will answer a multiple-choice question. Follow these steps strictly:\n"
+        "1. Analyze the question and all answer choices carefully.\n"
+        "2. Think step-by-step and reason through the possible answers.\n"
+        "   - Clearly explain your thought process inside <think> and </think> tags.\n"
+        "3. Conclude your reasoning and select the most correct answer.\n"
+        "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
+        "5. Output ONLY this format on the last line:\n"
+        "   FINAL_ANSWER: <choice_idx>\n"
     )
-    # A concise few-shot example.
+
+    # Optional few-shot example (can be removed if unnecessary)
     few_shot = (
-        "Example:\n"
-        "Question: What is 3 * 3?\n"
+        "### Example ###\n"
+        "Question: What is 5 + 7?\n"
         "Choices:\n"
-        "0: 6\n"
-        "1: 9\n"
-        "2: 12\n"
-        "3: 15\n"
-        "<think> 3 multiplied by 3 is 9 </think>\n"
-        "Answer: 1\n\n"
+        "0: 10\n"
+        "1: 12\n"
+        "2: 15\n"
+        "3: 17\n\n"
+        "<think> 5 plus 7 equals 12, which matches choice 1. </think>\n"
+        "FINAL_ANSWER: 1\n\n"
+        "################\n\n"
     )
-    # Extract the question and choices.
+
+    # Extract the question and choices
     question = example["question"]
     choices = example["choices"]
     choices_str = "\n".join([f"{i}: {choice}" for i, choice in enumerate(choices)])
-    # Combine everything into the final prompt.
+
+    # Construct the full prompt
     prompt = (
-        instructions + "\n\n" +
-        few_shot +
-        f"Question: {question}\n\n" +
+        instructions + "\n" +
+        few_shot +  # Remove this line if few-shot is not needed
+        "### Your Turn ###\n"
+        f"Question: {question}\n\n"
         f"Choices:\n{choices_str}\n\n"
     )
+
     return {"prompt": prompt}
+
 
 if __name__ == "__main__":
     # Parse arguments from command line.

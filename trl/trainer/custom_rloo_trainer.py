@@ -119,6 +119,10 @@ class Custom_RLOOTrainer(Trainer):
         # Instantiate Accelerator.
         accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
         self.accelerator = accelerator
+        if self.accelerator.is_main_process:
+            print(f"Using ARGS {config}")
+            print("---------------------------------------")
+        
         args.world_size = accelerator.num_processes
         args.local_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
         args.micro_batch_size = int(args.per_device_train_batch_size * args.world_size)
@@ -229,6 +233,10 @@ class Custom_RLOOTrainer(Trainer):
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
+            # TODO: should we set these to None? originally these are not passed
+            pad_token_id=processing_class.pad_token_id,
+            bos_token_id=processing_class.bos_token_id,
+            eos_token_id=processing_class.eos_token_id,
         )
 
         accelerator.print("=== Training policy ===")
@@ -309,12 +317,20 @@ class Custom_RLOOTrainer(Trainer):
                     eval_prompts = []
                     for q, c in zip(decoded_queries, decoded_completions):
                         prompt_text = (
-                            "You are an evaluator. Analyze the following query and generated completion. "
-                            "First, provide a concise chain-of-thought reasoning enclosed between <think> and </think> tokens. "
-                            "Then, on a new line, output only 'Evaluation: 1' if you judge the generated completion to be correct, "
-                            "or 'Evaluation: 0' if not. Do not include any extra text.\n\n"
-                            "Query: " + q + "\n\n"
-                            "Completion: " + c + "\n\n"
+                            "You are an evaluator tasked with determining the correctness of a generated response.\n"
+                            "Follow these steps strictly:\n"
+                            "1. Carefully read the given query and the corresponding generated completion.\n"
+                            "2. Think step-by-step and analyze whether the completion correctly answers the query.\n"
+                            "   - Clearly explain your reasoning inside <think> and </think> tokens.\n"
+                            "3. Conclude your evaluation.\n"
+                            "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
+                            "5. Output only this format on the last line:\n"
+                            "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
+                            "   - Ensure no additional text appears after this line.\n\n"
+                            "### Query ###\n"
+                            f"{q}\n\n"
+                            "### Completion ###\n"
+                            f"{c}\n\n"
                         )
                         eval_prompts.append(prompt_text)
 
@@ -333,14 +349,17 @@ class Custom_RLOOTrainer(Trainer):
                     batch_rewards = []
                     for txt in eval_texts:
                         try:
-                            evaluation_txt = txt.split("Evaluation:")[-1]
-                            reward_value = int(evaluation_txt.strip())
+                            # Extracting only the final evaluation line.
+                            evaluation_txt = txt.strip().split("\n")[-1].replace("FINAL_EVALUATION:", "").strip()
+                            reward_value = int(evaluation_txt)
                             if reward_value not in [0, 1]:
-                                reward_value = 0
+                                raise ValueError("Invalid evaluation score")
                         except Exception as e:
-                            reward_value = 0
+                            reward_value = 0  # Default to incorrect if parsing fails
                             print(f"Error parsing evaluator output: {e} on text: {txt}")
+                        
                         batch_rewards.append(reward_value)
+
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
                     print(f"Score: {score}")
 
@@ -497,6 +516,10 @@ class Custom_RLOOTrainer(Trainer):
             top_k=0.0,
             top_p=1.0,
             do_sample=True,
+            # TODO: should we set these to None? originally these are not passed
+            pad_token_id=processing_class.pad_token_id,
+            bos_token_id=processing_class.bos_token_id,
+            eos_token_id=processing_class.eos_token_id,
         )
         table = defaultdict(list)
         
@@ -532,12 +555,20 @@ class Custom_RLOOTrainer(Trainer):
                     eval_prompts = []
                     for q, c in zip(decoded_queries, decoded_completions):
                         prompt_text = (
-                            "You are an evaluator. Analyze the following query and generated completion. "
-                            "First, provide a concise chain-of-thought reasoning enclosed between <think> and </think> tokens. "
-                            "Then, on a new line, output only 'Evaluation: 1' if you judge the generated completion to be correct, "
-                            "or 'Evaluation: 0' if not. Do not include any extra text.\n\n"
-                            "Query: " + q + "\n\n"
-                            "Completion: " + c + "\n\n"
+                            "You are an evaluator tasked with determining the correctness of a generated response.\n"
+                            "Follow these steps strictly:\n"
+                            "1. Carefully read the given query and the corresponding generated completion.\n"
+                            "2. Think step-by-step and analyze whether the completion correctly answers the query.\n"
+                            "   - Clearly explain your reasoning inside <think> and </think> tokens.\n"
+                            "3. Conclude your evaluation.\n"
+                            "4. **Word Limit:** Your entire response (reasoning + answer) must not exceed **300 words**.\n"
+                            "5. Output only this format on the last line:\n"
+                            "   FINAL_EVALUATION: 0  (if the response is incorrect) or FINAL_EVALUATION: 1 (if correct).\n"
+                            "   - Ensure no additional text appears after this line.\n\n"
+                            "### Query ###\n"
+                            f"{q}\n\n"
+                            "### Completion ###\n"
+                            f"{c}\n\n"
                         )
                         eval_prompts.append(prompt_text)
 
@@ -556,17 +587,21 @@ class Custom_RLOOTrainer(Trainer):
                     batch_rewards = []
                     for txt in eval_texts:
                         try:
-                            evaluation_txt = txt.split("Evaluation:")[-1]
-                            reward_value = int(evaluation_txt.strip())
+                            # Extracting only the final evaluation line.
+                            evaluation_txt = txt.strip().split("\n")[-1].replace("FINAL_EVALUATION:", "").strip()
+                            reward_value = int(evaluation_txt)
                             if reward_value not in [0, 1]:
-                                reward_value = 0
+                                raise ValueError("Invalid evaluation score")
                         except Exception as e:
-                            reward_value = 0
+                            reward_value = 0  # Default to incorrect if parsing fails
                             print(f"Error parsing evaluator output: {e} on text: {txt}")
+                        
                         batch_rewards.append(reward_value)
+
                     score = torch.tensor(batch_rewards, dtype=torch.float, device=device)
                     print(f"Score: {score}")
                     table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
+                    table["evaluator_response"].extend(gather_object(eval_texts))
                 if sampling:
                     break
         import pandas as pd
