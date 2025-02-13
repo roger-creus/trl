@@ -25,6 +25,8 @@ python examples/scripts/test_rloo_trl.py \
     --total_episodes 10000 \
     --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
     --temperature 0.6 \
+    --response_length 512 \
+    --missing_eos_penalty 1.0 \
     --stop_token eos
 
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml \
@@ -34,8 +36,8 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
     --output_dir rloo_results \
     --rloo_k 4 \
     --local_rollout_forward_batch_size 4 \
-    --per_device_train_batch_size 16 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 2 \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --learning_rate 3e-6 \
@@ -43,19 +45,31 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
     --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
     --temperature 0.6 \
     --response_length 512 \
+    --missing_eos_penalty 1.0 \
     --stop_token eos
 """
 
 
 def craft_prompt(example):
-    # Extract question and choices from the example.
+    """
+    Constructs a prompt for a multiple-choice question using few-shot examples.
+
+    Args:
+        example (dict): A dictionary containing:
+            - "question" (str): The text of the question.
+            - "choices" (list of str): A list of answer choices.
+
+    Returns:
+        dict: A dictionary with a single key "prompt" that contains the complete prompt.
+    """
+    # Extract the question and choices from the example.
     question = example["question"]
     choices = example["choices"]
 
-    # Create a string with numbered choices.
-    choices_str = "\n".join([f"{i}: {choice}" for i, choice in enumerate(choices)])
+    # Format the answer choices with their corresponding index.
+    choices_str = "\n".join(f"{i}: {choice}" for i, choice in enumerate(choices))
 
-    # Few-shot examples to guide the model.
+    # Define few-shot examples to guide the model.
     few_shot_examples = (
         "Example 1:\n"
         "Question: What is 3 * 3?\n"
@@ -82,24 +96,25 @@ def craft_prompt(example):
         "3: 5\n"
         "ANSWER: 3\n\n"
     )
-    
-    # System prompt instructs the model about the expected answer format.
+
+    # Build the system prompt with instructions and few-shot examples.
     system_prompt = (
-        "Answer the following multiple-choice question by providing 'ANSWER: <integer_index_of_the_correct_choice>' "
-        "Always conclude your response with 'ANSWER: <integer_idx>' with no additional contents. "
-        f"You have a budget of {training_args.response_length // 2} words to generate the answer.\n\n" 
+        "Answer the following multiple-choice question by providing 'ANSWER: <integer_index_of_the_correct_choice>'. "
+        "Always conclude your response with 'ANSWER: <integer_idx>' and no additional content. "
+        f"You have a budget of {training_args.response_length // 2} words to generate your answer.\n\n"
         + few_shot_examples
     )
 
-    # User prompt provides the actual question and its choices.
+    # Create the user prompt with the actual question and its choices.
     user_prompt = (
         f"Question: {question}\n\n"
         f"Choices:\n{choices_str}\n\n"
     )
 
-    # Return the conversation in a list of messages.
-    return {"prompt": system_prompt + "### Your turn ###\n" + user_prompt}
+    # Combine the system prompt and the user prompt with a cue for the model.
+    complete_prompt = system_prompt + "### Your turn ###\n" + user_prompt
 
+    return {"prompt": complete_prompt}
 
 if __name__ == "__main__":
     # Parse arguments from command line.
@@ -121,7 +136,6 @@ if __name__ == "__main__":
     if tokenizer.chat_template is None:
         tokenizer.chat_template = SIMPLE_CHAT_TEMPLATE
 
-    # Load the SFT model for both policy and reference policy.
     ref_policy = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code
     )

@@ -327,24 +327,34 @@ class Custom_RLOOTrainer(Trainer):
                             predicted_answer = "-1"
                         
                         prompt_text = (
-                            "You will verify whether a given guessed answer to a multiple-choice question is INCORRECT or CORRECT. "
-                            "You do not need to know the true answer; your task is solely to assess the provided REASONING and GUESS.\n\n"
-                            "You are given the following input:\n"
-                            "1. A QUESTION with multiple answer choices.\n"
-                            "2. The REASONING provided for a guessed answer.\n"
-                            "3. The GUESS answer in the form 'GUESS: <integer_idx>'.\n\n"
-                            "Important: If the guessed answer is '-1', it indicates an error in generating the guess and you must simply return INCORRECT without further analysis."
-                            "Always conclude your response exactly with one of the following on the final line with no additional text:\n"
-                            "EVALUATION: INCORRECT   OR   EVALUATION: CORRECT\n\n"
-                            "For providing your EVALUATION, only the final GUESS matters. However, please analyze the accompanying REASONING step-by-step to detect any logical flaws. "
-                            "Think very deeply."
-                            f"You have a budget of {args.response_length // 2} words to generate the answer.\n\n" 
+                            "Your task is to determine whether the provided GUESS for a multiple-choice question is CORRECT or INCORRECT. "
+                            "You do not need to know the true answer; instead, analyse the accompanying REASONING and evaluate the GUESS.\n\n"
+                            
+                            "Input Details:\n"
+                            "1. QUESTION: A multiple-choice question with several answer options.\n"
+                            "2. REASONING: A step-by-step explanation supporting the GUESS.\n"
+                            "3. GUESS: The selected answer in the format 'GUESS: <integer_idx>'.\n\n"
+                            
+                            "Special Instructions:\n"
+                            "- If the GUESS is '-1', immediately return INCORRECT without further analysis.\n"
+                            "- Your final response must end with exactly one of the following lines (with no additional text):\n"
+                            "    EVALUATION: INCORRECT\n"
+                            "    EVALUATION: CORRECT\n\n"
+                            
+                            "Evaluation Guidelines:\n"
+                            "- Although your final verdict must depend only on the GUESS, carefully analyze the provided REASONING for any logical flaws.\n"
+                            "- Think deeply and be thorough in your analysis.\n"
+                            f"- You have a maximum of {args.response_length // 2} words to generate your response, so be clear and concise.\n\n"
+                            
                             "### QUESTION ###\n"
                             f"{actual_q}\n\n"
+                            
                             "### REASONING ###\n"
                             f"{reasoning_chain}\n\n"
+                            
                             "### GUESS ###\n"
                             f"{predicted_answer}\n\n"
+                            
                             "### Your turn ###\n"
                         )
                         eval_prompts.append(prompt_text)
@@ -644,24 +654,34 @@ class Custom_RLOOTrainer(Trainer):
                             predicted_answer = "-1"
                         
                         prompt_text = (
-                            "You will verify whether a given guessed answer to a multiple-choice question is INCORRECT or CORRECT. "
-                            "You do not need to know the true answer; your task is solely to assess the provided REASONING and GUESS.\n\n"
-                            "You are given the following input:\n"
-                            "1. A QUESTION with multiple answer choices.\n"
-                            "2. The REASONING provided for a guessed answer.\n"
-                            "3. The GUESS answer in the form 'GUESS: <integer_idx>'.\n\n"
-                            "Important: If the guessed answer is '-1', it indicates an error in generating the guess and you must simply return INCORRECT without further analysis."
-                            "Always conclude your response exactly with one of the following on the final line with no additional text:\n"
-                            "EVALUATION: INCORRECT   OR   EVALUATION: CORRECT\n\n"
-                            "For providing your EVALUATION, only the final GUESS matters. However, please analyze the accompanying REASONING step-by-step to detect any logical flaws. "
-                            "Think very deeply."
-                            f"You have a budget of {args.response_length // 2} words to generate the answer.\n\n" 
+                            "Your task is to determine whether the provided GUESS for a multiple-choice question is CORRECT or INCORRECT. "
+                            "You do not need to know the true answer; instead, analyse the accompanying REASONING and evaluate the GUESS.\n\n"
+                            
+                            "Input Details:\n"
+                            "1. QUESTION: A multiple-choice question with several answer options.\n"
+                            "2. REASONING: A step-by-step explanation supporting the GUESS.\n"
+                            "3. GUESS: The selected answer in the format 'GUESS: <integer_idx>'.\n\n"
+                            
+                            "Special Instructions:\n"
+                            "- If the GUESS is '-1', immediately return INCORRECT without further analysis.\n"
+                            "- Your final response must end with exactly one of the following lines (with no additional text):\n"
+                            "    EVALUATION: INCORRECT\n"
+                            "    EVALUATION: CORRECT\n\n"
+                            
+                            "Evaluation Guidelines:\n"
+                            "- Although your final verdict must depend only on the GUESS, carefully analyze the provided REASONING for any logical flaws.\n"
+                            "- Think deeply and be thorough in your analysis.\n"
+                            f"- You have a maximum of {args.response_length // 2} words to generate your response, so be clear and concise.\n\n"
+                            
                             "### QUESTION ###\n"
                             f"{actual_q}\n\n"
+                            
                             "### REASONING ###\n"
                             f"{reasoning_chain}\n\n"
+                            
                             "### GUESS ###\n"
                             f"{predicted_answer}\n\n"
+                            
                             "### Your turn ###\n"
                         )
                         eval_prompts.append(prompt_text)
