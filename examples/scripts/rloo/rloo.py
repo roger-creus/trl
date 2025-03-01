@@ -28,13 +28,13 @@ from trl.trainer.utils import SIMPLE_CHAT_TEMPLATE
 
 
 """
-python -i examples/scripts/rloo/rloo.py \
+python examples/scripts/rloo/rloo.py \
     --dataset_name trl-internal-testing/descriptiveness-sentiment-trl-style \
     --dataset_train_split descriptiveness \
     --learning_rate 3e-6 \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
-    --output_dir models/minimal/ppo \
+    --output_dir models/minimal/rloo \
     --per_device_train_batch_size 64 \
     --gradient_accumulation_steps 1 \
     --total_episodes 10000 \

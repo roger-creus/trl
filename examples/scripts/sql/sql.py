@@ -14,7 +14,6 @@
 
 import shutil
 
-import torch
 from accelerate import PartialState
 from datasets import load_dataset
 from transformers import (
@@ -24,24 +23,18 @@ from transformers import (
     HfArgumentParser,
 )
 
-from trl import (
-    ModelConfig,
-    PPOConfig,
-    PPOTrainer,
-    ScriptArguments,
-    get_kbit_device_map,
-    get_peft_config,
-    get_quantization_config,
-)
+from trl import ModelConfig, SQLConfig, SQLTrainer, ScriptArguments
 from trl.trainer.utils import SIMPLE_CHAT_TEMPLATE
 
 
 """
-python examples/scripts/ppo/ppo.py \
+python examples/scripts/sql/sql.py \
     --dataset_name trl-internal-testing/descriptiveness-sentiment-trl-style \
     --dataset_train_split descriptiveness \
     --learning_rate 3e-6 \
-    --output_dir models/minimal/ppo \
+    --num_ppo_epochs 1 \
+    --num_mini_batches 1 \
+    --output_dir models/minimal/sql \
     --per_device_train_batch_size 64 \
     --gradient_accumulation_steps 1 \
     --total_episodes 10000 \
@@ -49,10 +42,11 @@ python examples/scripts/ppo/ppo.py \
     --missing_eos_penalty 1.0
 
 accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml \
-    examples/scripts/ppo/ppo.py \
+    examples/scripts/sql/sql.py \
     --dataset_name trl-internal-testing/descriptiveness-sentiment-trl-style \
     --dataset_train_split descriptiveness \
-    --output_dir models/minimal/ppo \
+    --output_dir models/minimal/sql \
+    --rloo_k 2 \
     --num_ppo_epochs 1 \
     --num_mini_batches 1 \
     --learning_rate 3e-6 \
@@ -68,7 +62,7 @@ accelerate launch --config_file examples/accelerate_configs/deepspeed_zero3.yaml
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((ScriptArguments, PPOConfig, ModelConfig))
+    parser = HfArgumentParser((ScriptArguments, SQLConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_into_dataclasses()
     # remove output_dir if exists
     shutil.rmtree(training_args.output_dir, ignore_errors=True)
@@ -76,42 +70,21 @@ if __name__ == "__main__":
     ################
     # Model & Tokenizer
     ################
-    torch_dtype = (
-        model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
-    )
-    quantization_config = get_quantization_config(model_args)
-    model_kwargs = dict(
-        revision=model_args.model_revision,
-        attn_implementation=model_args.attn_implementation,
-        torch_dtype=torch_dtype,
-        device_map=get_kbit_device_map() if quantization_config is not None else None,
-        quantization_config=quantization_config,
-    )
-
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, padding_side="left", trust_remote_code=model_args.trust_remote_code
     )
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     if tokenizer.chat_template is None:
         tokenizer.chat_template = SIMPLE_CHAT_TEMPLATE
-    value_model = AutoModelForSequenceClassification.from_pretrained(
-        training_args.reward_model_path, trust_remote_code=model_args.trust_remote_code, num_labels=1
-    )
     reward_model = AutoModelForSequenceClassification.from_pretrained(
         training_args.reward_model_path, trust_remote_code=model_args.trust_remote_code, num_labels=1
+    )
+    ref_policy = AutoModelForCausalLM.from_pretrained(
+        training_args.sft_model_path, trust_remote_code=model_args.trust_remote_code
     )
     policy = AutoModelForCausalLM.from_pretrained(
         training_args.sft_model_path, trust_remote_code=model_args.trust_remote_code
     )
-
-    peft_config = get_peft_config(model_args)
-    if peft_config is None:
-        ref_policy = AutoModelForCausalLM.from_pretrained(
-            training_args.sft_model_path, trust_remote_code=model_args.trust_remote_code
-        )
-    else:
-        ref_policy = None
-
     ################
     # Dataset
     ################
@@ -149,16 +122,14 @@ if __name__ == "__main__":
     ################
     # Training
     ################
-    trainer = PPOTrainer(
-        args=training_args,
+    trainer = SQLTrainer(
+        config=training_args,
         processing_class=tokenizer,
-        model=policy,
-        ref_model=ref_policy,
+        policy=policy,
+        ref_policy=ref_policy,
         reward_model=reward_model,
-        value_model=value_model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        peft_config=peft_config,
     )
     trainer.train()
 
