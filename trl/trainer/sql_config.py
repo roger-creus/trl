@@ -68,10 +68,6 @@ class SQLConfig(OnPolicyConfig):
         default=4,
         metadata={"help": "Number of epochs to train."},
     )
-    whiten_rewards: bool = field(
-        default=False,
-        metadata={"help": "Whether to whiten the rewards."},
-    )
     kl_coef: float = field(
         default=0.05,
         metadata={"help": "KL coefficient."},
@@ -84,7 +80,7 @@ class SQLConfig(OnPolicyConfig):
         default=2,
         metadata={"help": "REINFORCE Leave-One-Out (RLOO) number of online samples per prompt."},
     )
-    normalize_reward: bool = field(
+    whiten_rewards: bool = field(
         default=False,
         metadata={"help": "Whether to normalize rewards"},
     )

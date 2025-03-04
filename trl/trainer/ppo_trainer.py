@@ -68,6 +68,7 @@ from .utils import (
     truncate_response,
 )
 
+from IPython import embed
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model

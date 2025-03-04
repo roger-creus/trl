@@ -44,6 +44,8 @@ from transformers.integrations import get_reporting_integration_callbacks
 from transformers.trainer import DEFAULT_CALLBACKS, DEFAULT_PROGRESS_CALLBACK
 from transformers.trainer_callback import CallbackHandler, ExportableState, PrinterCallback
 
+from ..core import masked_mean, masked_whiten
+
 from ..models.utils import unwrap_model_for_generation
 from ..trainer.utils import (
     OnlineTrainerState,
@@ -269,7 +271,6 @@ class SQLTrainer(Trainer):
         stats_shape = (args.num_ppo_epochs, args.num_mini_batches, args.gradient_accumulation_steps)
         td_loss_stats = torch.zeros(stats_shape, device=device)
         q_value_stats = torch.zeros(stats_shape, device=device)
-        td_error_stats = torch.zeros(stats_shape, device=device)
         model.train()
 
         # Trainer state initialization.
@@ -366,7 +367,8 @@ class SQLTrainer(Trainer):
                     ref_logprobs.append(ref_logprob)
                     sequence_lengths.append(sequence_length)
                     scores.append(score)
-                    values.append(logits)
+                    values.append(torch.logsumexp(logits, dim=-1))
+                    del logits
 
                 # Concatenate batched results.
                 responses = torch.cat(responses, 0)
@@ -397,7 +399,7 @@ class SQLTrainer(Trainer):
                 # 4. Compute rewards.
                 # Compute KL divergence (per token).
                 kl = logprobs - ref_logprobs
-                non_score_reward = ref_logprobs
+                non_score_reward = -args.kl_coef * kl
                 rewards = non_score_reward.clone()
                 actual_start = torch.arange(rewards.size(0), device=rewards.device)
                 actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
@@ -408,15 +410,27 @@ class SQLTrainer(Trainer):
                     rewards = masked_whiten(rewards, mask=~padding_mask_p1, shift_mean=False)
                     rewards = torch.masked_fill(rewards, padding_mask_p1, 0)
                     
-                # 6. compute target TD values (TD(0) targets).
-                gamma = 1.0  # or set gamma = args.gamma if desired.
-                td_target = torch.zeros_like(values)
-                td_target[:, :-1] = rewards[:, :-1] + gamma * torch.logsumexp(values[:, 1:], dim=-1)
-                td_target[:, -1] = rewards[:, -1]
-                td_target = masked_whiten(td_target, ~padding_mask)
-                td_target = torch.masked_fill(td_target, padding_mask, 0)
+                # 6. Compute Q(lambda) returns in a batched & masked style
+                q_lambda_returns_reversed = []
+                gen_length = responses.shape[1]
+                args.q_lambda = 0.0
+                args.gamma = 1.0
+                
+                for t in reversed(range(gen_length)):
+                    nextvalues = values[:, t + 1] if t < gen_length - 1 else 0.0
+                    if len(q_lambda_returns_reversed) == 0:
+                        q_return = rewards[:, t] + args.gamma * nextvalues
+                    else:
+                        q_return = (
+                            rewards[:, t]
+                            + args.gamma * (args.q_lambda * q_lambda_returns_reversed[-1] + (1 - args.q_lambda) * nextvalues)
+                        )
+                    q_lambda_returns_reversed.append(q_return)
+                q_lambda_returns = torch.stack(q_lambda_returns_reversed[::-1], axis=1)
+                #q_lambda_returns = masked_whiten(q_lambda_returns, ~padding_mask_p1)
+                #q_lambda_returns = torch.masked_fill(q_lambda_returns, padding_mask_p1, 0)
                 torch.cuda.empty_cache()
-
+               
             # -------------------- Soft Q-Learning Updates ---------------------
             for ppo_epoch_idx in range(args.num_ppo_epochs):
                 b_inds = np.random.permutation(args.local_batch_size)
@@ -429,34 +443,46 @@ class SQLTrainer(Trainer):
                         with accelerator.accumulate(model):
                             micro_batch_end = micro_batch_start + args.per_device_train_batch_size
                             micro_batch_inds = mini_batch_inds[micro_batch_start:micro_batch_end]
+                            mb_responses = responses[micro_batch_inds]
+                            mb_query_responses = query_responses[micro_batch_inds]
+                            mb_values = values[micro_batch_inds]
 
-                            # Get minibatch data.
-                            mb_responses = responses[micro_batch_inds]         # [B, seq_len]
-                            mb_query_responses = query_responses[micro_batch_inds]  # [B, total_seq_len]
-
-                            # Forward pass: compute logits for the response portion.
                             output = forward(model, mb_query_responses, processing_class.pad_token_id)
-                            logits = output.logits[:, context_length - 1 : -1]   # [B, seq_len, V]
+                            logits = output.logits[:, context_length - 1 : -1]
                             logits /= args.temperature + 1e-7
+                            
+                            # Compute new logprobs
+                            new_logprobs = selective_log_softmax(logits, mb_responses)
+                            new_logprobs = torch.masked_fill(
+                                new_logprobs, padding_mask[micro_batch_inds], INVALID_LOGPROB
+                            )
 
-                            # Compute Q-values as the logits corresponding to the chosen tokens.
-                            q_values = logits.gather(dim=-1, index=mb_responses.unsqueeze(-1)).squeeze(-1)
-
-                            loss = torch.nn.functional.mse_loss(q_values, td_target[micro_batch_inds])
-                            loss = loss.sum(dim=-1).mean()
+                            #reg_term = (new_logprobs + mb_returns[micro_batch_inds] - ref_logprobs[micro_batch_inds]).detach().mean()
+                            #mb_returns[micro_batch_inds, -1] += reg_term
+                            
+                            # shift vaues and add sequence scores at the end
+                            next_state_values = torch.cat(
+                                (mb_values[:, 1:], scores[micro_batch_inds].unsqueeze(1)), dim=1
+                            )
+                            
+                            loss = torch.square(
+                               (new_logprobs + mb_values - ref_logprobs[micro_batch_inds]) - next_state_values
+                            )
+                            loss = masked_mean(loss, ~padding_mask_p1[micro_batch_inds])
+                            
+                            #Compute Q-values as the logits corresponding to the chosen tokens.
+                            # q_values = logits.gather(dim=-1, index=mb_responses.unsqueeze(-1)).squeeze(-1)
+                            # loss = torch.square(q_values - mb_returns)
+                            # loss = masked_mean(loss, ~padding_mask_p1[micro_batch_inds])
                             
                             accelerator.backward(loss)
                             optimizer.step()
                             optimizer.zero_grad()
 
-                            # Compute additional metrics.
-                            avg_q_value = q_values.mean()
-                            avg_td_error = (torch.abs(q_values - td_target)).mean()
-
                             # Record soft Q-learning metrics.
                             td_loss_stats[ppo_epoch_idx, minibatch_idx, grad_accum_idx] = loss.item()
-                            q_value_stats[ppo_epoch_idx, minibatch_idx, grad_accum_idx] = avg_q_value.item()
-                            td_error_stats[ppo_epoch_idx, minibatch_idx, grad_accum_idx] = avg_td_error.item()
+                            q_value_stats[ppo_epoch_idx, minibatch_idx, grad_accum_idx] = logits.mean().item()
+                        
                         grad_accum_idx += 1
                     minibatch_idx += 1
                 # End of soft Q-learning update epoch.
@@ -472,12 +498,9 @@ class SQLTrainer(Trainer):
                 metrics["eps"] = eps
                 metrics["objective/kl"] = self.accelerator.gather_for_metrics(mean_kl).mean().item()
                 metrics["objective/entropy"] = self.accelerator.gather_for_metrics(mean_entropy).mean().item()
-                metrics["objective/rlhf_reward"] = self.accelerator.gather_for_metrics(rlhf_reward).mean().item()
                 metrics["objective/scores"] = self.accelerator.gather_for_metrics(scores.mean()).mean().item()
-                # New soft Q-learning metrics.
                 metrics["loss/td_loss_avg"] = self.accelerator.gather_for_metrics(td_loss_stats).mean().item()
                 metrics["q_value_avg"] = self.accelerator.gather_for_metrics(q_value_stats).mean().item()
-                metrics["td_error_avg"] = self.accelerator.gather_for_metrics(td_error_stats).mean().item()
                 metrics["val/num_eos_tokens"] = (responses == processing_class.eos_token_id).sum().item()
                 metrics["lr"] = self.lr_scheduler.get_last_lr()[0]
                 metrics["episode"] = self.state.episode
