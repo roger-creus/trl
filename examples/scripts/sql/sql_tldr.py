@@ -26,6 +26,8 @@ from transformers import (
 from trl import ModelConfig, SQLConfig, SQLTrainer, ScriptArguments
 from trl.trainer.utils import SIMPLE_CHAT_TEMPLATE
 
+from IPython import embed
+
 """
 python examples/scripts/sql/sql_tldr.py \
     --dataset_name trl-internal-testing/tldr-preference-sft-trl-style \
