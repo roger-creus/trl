@@ -240,6 +240,21 @@ class SQLTrainer(Trainer):
     def get_eval_dataloader(self) -> DataLoader:
         return self.eval_dataloader
 
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+        backup_model = self.model
+        self.model = self.model.policy  # save only the policy
+
+        if self.is_deepspeed_enabled:
+            backup_deepspeed = self.deepspeed
+            self.deepspeed = self.model
+
+        super().save_model(output_dir, _internal_call)
+
+        self.model = backup_model
+
+        if self.is_deepspeed_enabled:
+            self.deepspeed = backup_deepspeed
+
     def train(self):
         args = self.args
         accelerator = self.accelerator
@@ -295,6 +310,11 @@ class SQLTrainer(Trainer):
             else:
                 self.state.save_steps = args.save_steps
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
+        
+        # backward compatibility
+        if self.is_deepspeed_enabled:
+            self.deepspeed = self.model
+            self.model_wrapped = self.model
 
         for update in range(1, args.num_total_batches + 1):
             self.state.episode += 1 * args.batch_size
